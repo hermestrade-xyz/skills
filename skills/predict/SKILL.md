@@ -58,7 +58,7 @@ Override only for non-default cases — you rarely need any of these:
 
 ```bash
 predict-cli --tenant hermestrade.xyz ok          # same network, pin the host
-predict-cli --clob-endpoint http://localhost:8080 ok   # raw CLOB URL (local dev)
+predict-cli --clob-endpoint https://clob-api.hermestrade.xyz ok   # target the CLOB host directly
 ```
 
 ## 2. Wallet & auth (one-time)
