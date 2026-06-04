@@ -81,6 +81,14 @@ predict-cli auth create-key               # mint an L2 API key (or derive-key to
 predict-cli wallet show                   # EOA + Safe + signature type + config source (never echoes the key)
 ```
 
+> **After setting up the wallet, tell the user where the key lives and to back it
+> up.** A freshly created EOA exists only in `<config-dir>/config.toml` (Linux:
+> `~/.config/predict/config.toml`; macOS: `~/Library/Application Support/predict/config.toml`)
+> — lose that file and the funds are unrecoverable. Surface the exact path
+> (`predict-cli wallet show` prints `config path`) and remind the user to back it
+> up somewhere safe. Backing up means the user copying the file themselves — don't
+> print the key.
+
 > **Careful with `wallet detect-safe`.** It reads the server's `proxy_wallet`
 > field (via `GET /auth/api-keys`) and **unconditionally overwrites** the stored
 > Safe address — no check against what's already configured. Verify before
