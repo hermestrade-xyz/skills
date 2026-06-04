@@ -32,25 +32,24 @@ midpoint"* or *"show my positions"*.
 ## Quickstart
 
 ```bash
-# 1. Connect — read-only needs only the tenant
-export PM_TENANT=hermestrade.xyz
+# 1. Read-only works out of the box — the built-in `monad` network targets hermestrade.xyz
 predict-cli ok
+predict-cli endpoints           # network / endpoints / chain id / bound exchange
 
-# 2. One-time wallet + L2 key (stores your key, chain id, and Safe)
+# 2. One-time wallet + Safe + L2 key, all saved to config.toml
 predict-cli setup
 
-# 3. Trading also needs the exchange the market settles on
-export PM_EXCHANGE_ADDRESS=0x017641abFa4264121237023f9Fe678BF00F60De8   # CTF Exchange (binary markets)
-
-# 4. Read a market, then dry-run an order
+# 3. Read a market, then dry-run an order (maker = your stored Safe; exchange auto-binds)
 predict-cli fee-rate <TOKEN_ID>
 predict-cli book <TOKEN_ID>
 predict-cli order create --token <TOKEN_ID> --side buy --price 0.34 --size 100 \
-  --fee-rate-bps <FEE> --maker <SAFE_ADDRESS> --dry-run
+  --fee-rate-bps <FEE> --dry-run
 ```
 
-`PM_EXCHANGE_ADDRESS` is required for every order and must match the market — CTF Exchange
-for binary YES/NO markets, Neg Risk CTF Exchange for sports / multi-outcome. See
+No environment variables: the built-in `monad` network supplies the tenant, chain id,
+endpoints, exchange, and contract addresses, and `config.toml` holds your key and Safe.
+Binary YES/NO markets sign against the CTF Exchange automatically; for sports /
+multi-outcome markets add `--exchange-address <Neg Risk CTF Exchange>`. See
 [`SKILL.md`](skills/predict/SKILL.md) for the full workflow.
 
 ## Safety

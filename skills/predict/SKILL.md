@@ -2,90 +2,112 @@
 name: predict
 description: >-
   Trade prediction markets on hermestrade.xyz with the predict-cli binary:
-  install the CLI, set up a wallet and L2 API key, discover
-  markets, read orderbooks, place and cancel limit/market orders, track positions
-  and PnL, split/merge/redeem conditional tokens, and stream live WebSocket
-  updates. Use this skill whenever the user mentions predict-cli, predict-rs,
-  hermestrade, prediction markets, outcome shares, YES/NO tokens,
-  CLOB orders, or conditional tokens (CTF) — even if they don't name the tool
-  explicitly, and even for read-only questions like "what's the midpoint" or
-  "show my positions".
+  install the CLI, set up a wallet and L2 API key, discover markets, read
+  orderbooks, place and cancel limit/market orders, track positions and PnL,
+  split/merge/redeem conditional tokens, and stream live WebSocket updates. Use
+  this skill whenever the user mentions predict-cli, predict-rs, hermestrade,
+  prediction markets, outcome shares, YES/NO tokens, CLOB orders, or conditional
+  tokens (CTF) — even if they don't name the tool explicitly, and even for
+  read-only questions like "what's the midpoint" or "show my positions".
 ---
 
 # Trading prediction markets with predict-cli
 
-`predict-cli` is the terminal client for the HermesTrade prediction-market
-CLOB exchange.
+`predict-cli` is the terminal client for the HermesTrade prediction-market CLOB
+exchange. Out of the box it targets the built-in **`monad`** network (tenant
+`hermestrade.xyz`): the chain id, endpoints, exchange, and every contract address
+are compiled into the binary, so reads and trades need **no connection flags and
+no environment variables**. Everything that has to persist — your key, Safe, and
+identity — lives in one file, `config.toml`.
+
 Every command supports `-o json` for machine-readable output — prefer it when you
 need to parse results (pipe to `jq`).
 
 ## 0. Get the CLI
 
 Run `scripts/ensure-cli.sh` first. It is idempotent: if `predict-cli` is already
-on PATH it does nothing; otherwise it installs the latest release via the
-official installer (which verifies the sha256 checksum before installing):
+on PATH it does nothing; otherwise it installs the latest release via the official
+installer (statically linked musl binary on Linux, sha256-verified):
 
 ```bash
 curl -sSfL https://raw.githubusercontent.com/chainupcloud/predict-rs/main/install.sh | sh
 ```
 
-If you are working inside a `predict-rs` checkout, `cargo build --release` and
+Inside a `predict-rs` checkout, `cargo build --release` →
 `target/release/predict-cli` works too.
 
-## 1. Connect to HermesTrade
+This skill targets **predict-cli 0.2.0+** — the built-in network registry and the
+config.toml-first model described below are 0.2.0 features (0.1.x used environment
+variables and a `~/.config/pm` config dir). Confirm with `predict-cli --version`.
 
-Every command targets **hermestrade.xyz**. Export it once as the default and each
-command — and the helper scripts — pick it up; the CLI derives the CLOB / Gamma /
-WebSocket endpoints from the host automatically (`clob-api.hermestrade.xyz`,
-`gamma-api.hermestrade.xyz`, `wss://clob-ws.hermestrade.xyz`):
+## 1. Connect (nothing to configure)
+
+The default `monad` network supplies the tenant, chain id (143), the CLOB / Gamma /
+WebSocket / Data / relayer endpoints, the exchange, and all contract addresses.
+Read-only commands work immediately:
 
 ```bash
-export PM_TENANT=hermestrade.xyz   # default target for the session
-
-predict-cli ok          # health check
-predict-cli endpoints   # show the resolved URLs + chain id
+predict-cli ok          # server health
+predict-cli endpoints   # resolved network / tenant / clob / gamma / ws / chain_id / exchange
 ```
 
-`PM_TENANT` backs the global `--tenant` flag, so once it's exported you never repeat it;
-a one-off `predict-cli --tenant hermestrade.xyz <cmd>` is the equivalent when you haven't.
+`endpoints` is the pre-trade sanity check: it prints exactly which network, chain,
+and **exchange (EIP-712 `verifyingContract`)** the order signer will bind to.
+
+Override only for non-default cases — you rarely need any of these:
+
+```bash
+predict-cli --tenant hermestrade.xyz ok          # same network, pin the host
+predict-cli --clob-endpoint http://localhost:8080 ok   # raw CLOB URL (local dev)
+```
 
 ## 2. Wallet & auth (one-time)
 
-For first-time setup prefer the guided wizard — it walks through wallet, Safe
-detection, and L2 API-key creation in one pass (it reads the target host from
-`PM_TENANT`):
+Prefer the guided wizard. It walks through wallet → tenant identity (chain +
+**scopeId** + signature type) → Safe address → L2 API key, and writes everything to
+`config.toml`:
 
 ```bash
 predict-cli setup
 ```
 
-Manual equivalent:
+Manual equivalent — the individual subcommands edit the same `config.toml`:
 
 ```bash
-predict-cli wallet create                 # fresh EOA, stored 0600 in <config-dir>/config.toml
+predict-cli wallet create                 # fresh EOA → config.toml (mode 0600); --force to overwrite
 predict-cli wallet import 0xYOURKEY       # or import an existing key
-predict-cli auth create-key               # L2 API key (or derive-key to recover an existing one)
 predict-cli wallet set-safe 0xSAFE        # persist the funded Safe address
-predict-cli wallet show                   # address + Safe + signature type + config source
+predict-cli auth create-key               # mint an L2 API key (or derive-key to recover one)
+predict-cli wallet show                   # EOA + Safe + signature type + config source (never echoes the key)
 ```
 
 > **Careful with `wallet detect-safe`.** It reads the server's `proxy_wallet`
-> field and **unconditionally overwrites** the stored Safe address — there is no
-> check against what's already configured. Verify the result before trading: the
-> address should hold the USDW balance (`balance --asset-type collateral`) and
-> have contract code deployed. When in doubt, `wallet set-safe` the known-funded
-> address instead.
+> field (via `GET /auth/api-keys`) and **unconditionally overwrites** the stored
+> Safe address — no check against what's already configured. Verify before
+> trading: the address should hold the USDW balance
+> (`balance --asset-type collateral`) and have contract code deployed. When in
+> doubt, `wallet set-safe` the known-funded address instead.
 
 Key facts that prevent confusion later:
 
-- **Default signature type is `gnosis-safe`**: the EOA only signs; a 1-of-1
-  Safe holds the USDW and outcome tokens and is the order `maker`. Balances and
+- **Default signature type is `gnosis-safe`.** The EOA only signs; a 1-of-1 Safe
+  holds the USDW and outcome tokens and is the order `maker`. Balances and
   positions belong to the **Safe address**, not the EOA.
-- Config lives in `~/.config/pm/config.toml` (Linux) or
-  `~/Library/Application Support/pm` (macOS).
-- Prefer `PM_PRIVATE_KEY` env over `--private-key` — flags leak into shell history.
+- **`scopeId`** is the tenant isolation key (`bytes32`) baked into every signed
+  `ClobAuth` and order; the wrong scope derives a different L2 key and different
+  order state. `setup` prompts for it; the canonical hermestrade value lives in
+  `examples/config.toml` in predict-rs. The network does *not* supply it.
+- **The private key is read only from `--private-key` or `config.toml`** — there
+  is **no `PM_PRIVATE_KEY` env var** (a key in the environment leaks via
+  `/proc/<pid>/environ`). Prefer the config file over the flag (flags leak into
+  shell history).
+- Config lives in `~/.config/predict/config.toml` (Linux, dir mode 0700, file
+  mode 0600) or `~/Library/Application Support/predict` (macOS). `config.toml`
+  persists `private_key`, `safe_address`, `scope_id`, `signature_type`, and
+  optional `network` / `chain_id` / `tenant` overrides. Only `private_key` is
+  required for signing; the network provides the rest.
 
-Before a trading session, sanity-check with `predict-cli ok`,
+Before a trading session, sanity-check with `predict-cli endpoints`,
 `predict-cli wallet show`, and `predict-cli balance --asset-type collateral`.
 
 ## 3. Safety rules (real funds)
@@ -94,10 +116,10 @@ Orders and CTF operations move real money. Hold to these:
 
 - **Confirm before committing funds.** Before any `order create` / `order market`
   / `ctf … --execute` / `approve set --execute`, state the market, side, price,
-  size, and resulting notional, and get the operator's explicit go-ahead —
-  unless they have already given you a standing budget and instruction.
+  size, and resulting notional, and get the operator's explicit go-ahead — unless
+  they have already given you a standing budget and instruction.
 - **Dry-run first on new flows.** `order create --dry-run` prints the signed
-  envelope without posting; `ctf`/`approve` writes default to dry-run and only
+  envelope without posting; `ctf` / `approve` writes default to dry-run and only
   submit with `--execute`. Inspect, then re-run for real.
 - **Never print private keys.** `wallet show` is safe (it never echoes the key);
   `config.toml` contents are not — don't cat it.
@@ -117,8 +139,8 @@ From a market object you need two identifiers:
 
 - `conditionId` (`0x…` hex) — keys the market for `order cancel-market`,
   `ws user --market`, and CTF operations.
-- `clobTokenIds` — the YES/NO outcome token ids (uint256 decimals). Orders,
-  books, and prices are all per **token id**.
+- `clobTokenIds` — the YES/NO outcome token ids (uint256 decimals). Orders, books,
+  and prices are all per **token id**.
 
 ## 5. Read the market
 
@@ -132,62 +154,60 @@ predict-cli book <TOKEN_ID>
 predict-cli price <TOKEN_ID> --side buy
 ```
 
-Batch variants take comma-separated ids: `midpoints` / `spreads` / `last-trades`
-take bare ids (`last-trades` is capped at 500); `prices` / `books` take
-`<id>:<side>` entries, e.g. `predict-cli prices 123:buy 456:sell`.
+Batch variants: `midpoints` / `spreads` / `last-trades` take bare ids
+(`last-trades` is server-capped at 500); `prices` / `books` take `<id>:<side>`
+entries, e.g. `predict-cli prices 123:buy 456:sell`.
 
 ## 6. Place orders
 
-Signing an order needs the EOA key, the chain id, and the **exchange the market
-settles on** — all three are baked into the EIP-712 signature. `setup` already
-stored your key and chain id (Monad, `143`); the one thing it does *not* store is
-the exchange address, which you must set yourself:
+The order signature embeds the EOA key, the chain id, and the **exchange the
+market settles on** (EIP-712 `verifyingContract`). All three resolve
+automatically from `config.toml` + the `monad` network — there is nothing to
+export:
 
-```bash
-export PM_EXCHANGE_ADDRESS=0x017641abFa4264121237023f9Fe678BF00F60De8   # CTF Exchange
-```
+- **Binary (YES/NO) markets** sign against the network's **CTF Exchange**
+  (`0x017641abFa4264121237023f9Fe678BF00F60De8`) — the default, zero config.
+- **Sports / multi-outcome families** settle on the **Neg Risk CTF Exchange**
+  (`0x50b7B00EE75F8bFb5cDa892883aFb3867851c738`). Gamma doesn't expose a per-market
+  neg-risk flag, so if a correctly-keyed order is rejected with
+  `EXECUTION_ERROR: INVALID_SIGNATURE: signer mismatch`, re-sign against it:
+  `--exchange-address 0x50b7B00EE75F8bFb5cDa892883aFb3867851c738`.
 
-**`PM_EXCHANGE_ADDRESS` is mandatory.** Order signing aborts before posting with
-`exchange address required for sign_order` if it is unset, and it must match the
-market type:
-
-- **Binary (YES/NO) markets → CTF Exchange** `0x017641abFa4264121237023f9Fe678BF00F60De8`
-- **Sports / multi-outcome families → Neg Risk CTF Exchange** `0x50b7B00EE75F8bFb5cDa892883aFb3867851c738`
-
-Picking the wrong one is rejected server-side with
-`EXECUTION_ERROR: INVALID_SIGNATURE: signer mismatch` — swap to the other address
-(per-invocation override: `--exchange-address <addr>`). Both addresses come from
-the `contracts` block of `examples/networks/monad-hermestrade.yaml` in predict-rs,
-or `predict-cli gamma public-info`.
+`predict-cli endpoints` shows the bound exchange; both addresses also come from
+`predict-cli gamma public-info`.
 
 Always fetch `fee-rate` and `tick-size` for the token first; the server rejects
-orders that miss the fee or violate price granularity (the CLI does not check tick
-decimals locally). Limit order — default Safe mode, so `--maker` is **required**
-and is the Safe address from `wallet show` (it is *not* auto-filled from config):
+orders that miss the fee or violate price granularity. In the default Safe mode
+`--maker` is **optional** — it falls back to the `safe_address` in `config.toml`
+(`wallet set-safe` / `setup`); pass `--maker <SAFE>` only to override it.
 
 ```bash
 predict-cli order create \
   --token <TOKEN_ID> --side buy --price 0.34 --size 100 \
   --fee-rate-bps <FROM_FEE_RATE> \
-  --maker <SAFE_ADDRESS> \
-  --dry-run          # drop after inspecting the envelope
+  --dry-run          # drop after inspecting the envelope; maker = stored Safe
 ```
 
-Market order (FAK by default; `--amount` is USDC notional, BUY only; `--size` is
-share-denominated). A market order **still needs `--price`** — the limit/anchor the
-signed amounts are pinned to:
+Market order — `order market` is the slim alias for `order create --market` (FAK by
+default). `--amount` is USDC notional (**BUY only**); `--size` is share-denominated
+(SELL must use `--size`). A `--price` anchor is still required on the wire:
 
 ```bash
 predict-cli order market --token <TOKEN_ID> --side buy --amount 25 --price 0.34 \
-  --fee-rate-bps <BPS> --maker <SAFE_ADDRESS>
+  --fee-rate-bps <BPS>
 ```
 
 Rules the exchange enforces:
 
-- `price` ∈ (0, 1), decimals capped by tick size (tick 0.01 → 2 dp, 0.001 → 3 dp,
-  0.0001 → 4 dp), enforced **server-side**. `size` max 2 decimals; amounts
-  floor-truncate to 6 decimals.
-- Per-event **minimum order size** — a too-small order is rejected server-side.
+- **Minimum order size: 5 shares.** Smaller is rejected with
+  `ORDER_SIZE_TOO_SMALL: limit order requires share >= 5`, even at a low price.
+- **Lot size 0.01.** `size` rounds to 0.01; for a market order, `amount / price`
+  must round to a multiple of 0.01 (else `… has N decimals; lot size is 2`).
+- `price` ∈ (0, 1), decimals capped by tick size (0.01 → 2 dp, 0.001 → 3 dp,
+  0.0001 → 4 dp), enforced **server-side**. Amounts floor-truncate to 6 decimals.
+- **Fees are charged in shares on the receiving side**, not in USDW. A BUY of 5 @
+  0.09 with `--fee-rate-bps 20` spends exactly 0.45 USDW but credits 4.99 tokens.
+  (SELL fees come out in USDW.)
 - Order types: `gtc` (default limit), `gtd` (requires `--expiration` unix-seconds),
   `fok` / `fak` (market). `--post-only` makes a limit order maker-only.
 - EOA mode (`--signature-type eoa`): `--maker` defaults to the signer address.
@@ -202,7 +222,8 @@ predict-cli order cancel-many id1,id2,id3    # ≤ 3000
 predict-cli order cancel-market --market 0xCONDITION_ID   # and/or --asset-id <TOKEN_ID>
 predict-cli order cancel-all                 # everything for the API key — confirm first
 predict-cli order replace --cancel id1 --orders-file new.json   # new.json from --dry-run output
-predict-cli order post-batch …               # ≤ 15 orders, shared side/fee/maker
+predict-cli order post-batch --tokens t1,t2 --prices 0.10,0.05 --sizes 5,5 \
+  --side buy --fee-rate-bps 20               # ≤ 15 orders, shared side/fee/maker
 ```
 
 ## 7. Track fills and balances
@@ -213,18 +234,16 @@ predict-cli balance --asset-type collateral          # USDW
 predict-cli balance --asset-type conditional --token <TOKEN_ID>
 ```
 
-(`balance --update` forces a subgraph refresh; plain `balance` returns the cached
-value. Cross-check on-chain when a balance is load-bearing.)
+`balance --update` forces a subgraph refresh; plain `balance` returns the cached
+value. Cross-check on-chain when a balance is load-bearing.
 
 On `/ws/user` (and in `trade` output) the trade `status` field takes the uppercase
-values `MATCHED` / `MINED` / `CONFIRMED` / `RETRYING` / `FAILED` (the `TradeStatus`
-enum). Treat a fill as final only at `CONFIRMED`; `MATCHED` means the engine matched
-it but settlement is still pending. The `match_type` field is `MATCH` (bilateral
+`TradeStatus` values `MATCHED` / `MINED` / `CONFIRMED` / `RETRYING` / `FAILED`.
+Treat a fill as final only at `CONFIRMED`; `MATCHED` means the engine matched it
+but settlement is still pending. The `match_type` field is `MATCH` (bilateral
 fill), `MINT` (mints the complementary token — neg-risk maker side), or `MERGE`
-(burns a complementary pair). Per the fee formula in `docs/orders.md`, BUY fees are
-charged **in outcome tokens** (you receive slightly fewer shares than `size`) and
-SELL fees in USDC. `data activity` rows carry an `activity_type` of `TRADE` /
-`SPLIT` / `MERGE` / `REDEEM` / `REWARD` / `CONVERSION`.
+(burns a complementary pair). `data activity` rows carry an `activity_type` of
+`TRADE` / `SPLIT` / `MERGE` / `REDEEM` / `REWARD` / `CONVERSION`.
 
 ## 8. Positions & PnL
 
@@ -241,30 +260,35 @@ predict-cli data user-pnl <SAFE_ADDRESS>
 ## 9. CTF operations (split / merge / redeem)
 
 On-chain writes go through the relayer as Safe meta-transactions, so they require
-the default `gnosis-safe` signature type plus a Safe address (`wallet set-safe`),
-and a network-config YAML — use `examples/networks/monad-hermestrade.yaml` from
-predict-rs (it carries chain id, RPC, the relayer endpoint, and contract
-addresses). All writes default to **dry-run**:
+the default `gnosis-safe` signature type plus a stored Safe address. They run
+against the built-in network (chain id, RPC, relayer, and contract addresses come
+from `monad` — there is **no `--network-config` flag**), and default to **dry-run**:
 
 ```bash
-# One-time prerequisite: USDW allowance + CTF setApprovalForAll.
-# Pass --address <SAFE>: the EOA holds nothing, so its allowance is always zero.
-predict-cli approve check --network-config <yaml> --address <SAFE_ADDRESS>
-predict-cli approve set   --network-config <yaml> --execute
+# One-time approvals. approve check uses the stored Safe (or --address <SAFE>).
+# approve set defaults to --asset all over the three exchange targets via MultiSend.
+predict-cli approve check
+predict-cli approve set   --execute
 
-# --amount is RAW 6-decimal units: 1000000 = 1 USDW. Run without --execute
-# first and read back the dry-run plan's amount before submitting.
-predict-cli ctf split  --network-config <yaml> --condition-id 0x… --partition 1,2 --amount 1000000 --execute
-predict-cli ctf merge  --network-config <yaml> --condition-id 0x… --partition 1,2 --amount 1000000 --execute
-predict-cli ctf redeem --network-config <yaml> --condition-id 0x… --index-sets 1,2 --execute   # only after resolution
+# split / merge call ConditionalTokens directly, which is NOT in the default
+# approve targets — approve USDW for it once before your first split:
+predict-cli approve set --asset usdw \
+  --spender 0xd77d550092aB455bd1b9071E4185eCbB6E8d6a2A --execute
+
+# --amount is RAW 6-decimal units: 1000000 = 1 USDW. Run without --execute first
+# and read back the dry-run plan's amount before submitting.
+predict-cli ctf split  --condition-id 0x… --partition 1,2 --amount 1000000 --execute
+predict-cli ctf merge  --condition-id 0x… --partition 1,2 --amount 1000000 --execute
+predict-cli ctf redeem --condition-id 0x… --index-sets 1,2 --execute   # only after resolution
 ```
 
 For **neg-risk** markets the write target is the Neg Risk Adapter, not the default
-ConditionalTokens contract — pass `--contract <neg_risk_adapter>` (address in the
-YAML). `redeem` succeeds only once the condition is resolved on-chain (non-zero
-`payoutNumerators`). `ctf condition-id` / `position-id` compute identifiers locally
-with no RPC; `ctf collection-id` needs the network config (it reads
-`getCollectionId` on-chain) but submits no transaction.
+ConditionalTokens contract — pass
+`--contract 0x4c3Ba1A5A6BEaF4CDA6E1Dca75fF9e889A076bE8`. `redeem` succeeds only
+once the condition is resolved on-chain (non-zero `payoutNumerators`).
+`ctf condition-id` / `position-id` compute identifiers locally with no RPC;
+`ctf collection-id` reads `getCollectionId` on-chain (RPC from the network, override
+with `--rpc-url`) but submits no transaction.
 
 ## 10. Watch live
 
@@ -272,7 +296,7 @@ with no RPC; `ctf collection-id` needs the network config (it reads
 predict-cli ws ping                                   # connectivity check
 predict-cli ws book <TOKEN_ID> --count 5              # N frames, then exit
 predict-cli ws book-watch <TOKEN_ID>                  # stream until Ctrl-C (--print-as-json for jq)
-predict-cli ws user --market <CONDITION_ID>           # own orders + trades (auto-derives L2 creds)
+predict-cli ws user --market <CONDITION_ID>           # own orders + trades; repeat --market to add ids
 ```
 
 For one-shot checks prefer REST reads; use `ws` when the user wants continuous
@@ -282,16 +306,16 @@ monitoring or to wait for a fill.
 
 | Symptom | Fix |
 |---------|-----|
-| `no private key configured` | `predict-cli wallet create` / `import`, or set `PM_PRIVATE_KEY` |
+| `private key required` / `no private key configured` | `predict-cli wallet create` / `import`, or pass `--private-key` (no env var) |
 | 401 / `authentication failed` | `predict-cli auth derive-key` (existing key) or `auth create-key` |
-| `exchange address required for sign_order` | set `PM_EXCHANGE_ADDRESS` — CTF Exchange (binary) or Neg Risk (multi-outcome), see §6 |
-| `--maker is required for signature_type=gnosis-safe` | pass the Safe address from `wallet show` (use `set-safe` to persist; treat `detect-safe` output as untrusted — see §2) |
-| `INVALID_SIGNATURE: signer mismatch` on `POST /order` | wrong exchange for this market — re-sign with the other one via `--exchange-address` (CTF vs Neg Risk, see §6) |
+| `no maker for signature_type=gnosis-safe` | store the Safe with `predict-cli wallet set-safe <addr>` (or `setup`), pass `--maker <SAFE>`, or use `--signature-type eoa` |
+| `INVALID_SIGNATURE: signer mismatch` on `POST /order` | neg-risk market — re-sign with `--exchange-address 0x50b7B00EE75F8bFb5cDa892883aFb3867851c738` (see §6) |
+| `ORDER_SIZE_TOO_SMALL: … requires share >= 5` | raise size to ≥ 5 shares |
+| `… has N decimals; lot size is 2` | round `size` (or market `amount / price`) to a multiple of 0.01 |
 | price rejected | re-check `tick-size` — too many decimals for this market |
-| order below minimum | raise size; the per-event minimum is server-enforced |
-| allowance / transfer failures on split or first order | `approve check`, then `approve set --execute` |
+| allowance / transfer failures on split or first order | `approve check`, then `approve set --execute` (and the ConditionalTokens approval in §9 for split/merge) |
 | `next_cursor: "LTE="` in paginated output | end of stream — stop paging |
 
 Deeper reference: `docs/orders.md`, `docs/ws.md`, `docs/wallet.md`,
-`docs/auth-flow.md`, `docs/gamma.md` in the
+`docs/auth-flow.md`, `docs/gamma.md`, and `cli/README.md` in the
 [predict-rs repo](https://github.com/chainupcloud/predict-rs).
