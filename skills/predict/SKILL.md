@@ -38,9 +38,9 @@ curl -sSfL https://raw.githubusercontent.com/chainupcloud/predict-rs/main/instal
 Inside a `predict-rs` checkout, `cargo build --release` →
 `target/release/predict-cli` works too.
 
-This skill targets **predict-cli 0.2.0+** — the built-in network registry and the
-config.toml-first model described below are 0.2.0 features (0.1.x used environment
-variables and a `~/.config/pm` config dir). Confirm with `predict-cli --version`.
+This skill tracks the **latest** predict-cli release — what the installer above
+fetches. If a command or flag here doesn't match your binary, re-run the installer
+to update (`predict-cli --version` shows what you have).
 
 ## 1. Connect (nothing to configure)
 
