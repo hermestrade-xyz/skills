@@ -2,13 +2,15 @@
 name: predict
 description: >-
   Trade prediction markets on hermestrade.xyz with the predict-cli binary:
-  install the CLI, set up a wallet and L2 API key, discover markets, read
-  orderbooks, place and cancel limit/market orders, track positions and PnL,
-  split/merge/redeem conditional tokens, and stream live WebSocket updates. Use
-  this skill whenever the user mentions predict-cli, predict-rs, hermestrade,
-  prediction markets, outcome shares, YES/NO tokens, CLOB orders, or conditional
-  tokens (CTF) — even if they don't name the tool explicitly, and even for
-  read-only questions like "what's the midpoint" or "show my positions".
+  install the CLI, set up a wallet and L2 API key, create a Safe, deposit and
+  withdraw collateral (USDC↔USDW), discover markets, read orderbooks, place and
+  cancel limit/market orders, track positions and PnL, split/merge/redeem
+  conditional tokens, and stream live WebSocket updates. Use this skill whenever
+  the user mentions predict-cli, predict-rs, hermestrade, prediction markets,
+  outcome shares, YES/NO tokens, CLOB orders, conditional tokens (CTF), or
+  depositing / withdrawing / funding the Safe — even if they don't name the tool
+  explicitly, and even for read-only questions like "what's the midpoint" or
+  "show my positions".
 ---
 
 # Trading prediction markets with predict-cli
@@ -89,6 +91,15 @@ predict-cli wallet show                   # EOA + Safe + signature type + config
 > up somewhere safe. Backing up means the user copying the file themselves — don't
 > print the key.
 
+**No Safe yet?** `predict-cli wallet deploy-safe` creates the EOA's Gnosis Safe
+on-chain via the relayer's SAFE-CREATE — **gasless** (the relayer pays), with a
+**deterministic** address derived from your EOA + `scopeId`, and **one-shot** per
+`(EOA, scopeId)` (rejected once code exists there). It needs a `scope_id`
+configured, and on success saves the deployed address to `config.toml` (`--save`,
+on by default). Use it when the EOA has no Safe; if you already control a funded
+Safe, `wallet set-safe <addr>` instead. It **submits by default** — add `--dry-run`
+to only predict + sign the address.
+
 > **Careful with `wallet detect-safe`.** It reads the server's `proxy_wallet`
 > field (via `GET /auth/api-keys`) and **unconditionally overwrites** the stored
 > Safe address — no check against what's already configured. Verify before
@@ -123,18 +134,79 @@ Before a trading session, sanity-check with `predict-cli endpoints`,
 Orders and CTF operations move real money. Hold to these:
 
 - **Confirm before committing funds.** Before any `order create` / `order market`
-  / `ctf … --execute` / `approve set --execute`, state the market, side, price,
-  size, and resulting notional, and get the operator's explicit go-ahead — unless
-  they have already given you a standing budget and instruction.
+  / `deposit` / `withdraw` / `ctf … --execute` / `approve set --execute` /
+  `wallet deploy-safe`, state the market, side, price, size, and resulting notional
+  (or the amount moved), and get the operator's explicit go-ahead — unless they
+  have already given you a standing budget and instruction.
 - **Dry-run first on new flows.** `order create --dry-run` prints the signed
   envelope without posting; `ctf` / `approve` writes default to dry-run and only
-  submit with `--execute`. Inspect, then re-run for real.
+  submit with `--execute`. **`deposit` / `withdraw` / `wallet deploy-safe` are the
+  exception — they broadcast by default; add `--dry-run` to preview.** Inspect,
+  then re-run for real.
 - **Never print private keys.** `wallet show` is safe (it never echoes the key);
   `config.toml` contents are not — don't cat it.
 - **Stay inside any budget the operator set**, and stop and report rather than
   retry when a money-moving call fails in an unexpected way.
 
-## 4. Discover markets
+## 4. Fund the Safe — deposit & withdraw
+
+Trading collateral is **USDW**, held by the Safe. Mint it by depositing **USDC**;
+redeem it back to USDC by withdrawing. Both move real funds — the §3 rules apply,
+and unlike `ctf` / `approve` these commands **broadcast by default** (`--dry-run`
+previews).
+
+### Deposit (USDC → USDW)
+
+`predict-cli deposit` wraps the **EOA's USDC** into USDW and mints it straight to
+the Safe. It is the one predict-cli flow that sends a **direct EOA transaction**
+(the USDC lives in the EOA, so there is no Safe to route through), so the EOA needs
+USDC **plus a little MON for gas**:
+
+```bash
+predict-cli deposit --amount 5            # wrap 5 USDC → 5 USDW into the Safe
+predict-cli deposit --amount 5 --dry-run  # check balance + allowance, print the plan, don't broadcast
+```
+
+- `--amount` is whole units (`5`, `5.5`), scaled by the asset's on-chain decimals.
+- `--to <addr>` overrides the mint recipient (defaults to the Safe in config).
+- `--asset <addr>` overrides the underlying USDC (defaults to the network's
+  `usdw_underlying` — `0x754704Bc059F8C67012fEd69BC8A327a5aafb603` on Monad: USDC,
+  6 decimals, distinct from the `usdw` trading collateral).
+- It auto-`approve`s USDC to the wrapper when the allowance is short, then calls
+  `USDWrapper.wrap` (one immediate tx). It aborts if the EOA's USDC balance is below
+  `--amount`.
+
+### Withdraw (USDW → USDC) — two steps, with a delay
+
+Withdraw is Safe-side and **two-step**, separated by the wrapper's on-chain
+`unwrapDelay` (**~24h on Monad**, measured in real wall-clock time — fast block
+production does *not* shorten it):
+
+```bash
+# 1. initiate — burn the Safe's USDW via the relayer (gasless), open a delayed
+#    unwrap request, and print its requestId.
+predict-cli withdraw initiate --amount 1
+#    → request_id (this initiate): 3
+#    → claimable in ~86400s (~24h) via: predict-cli withdraw claim --request-id 3
+
+# 2. status — read the request's on-chain state any time
+predict-cli withdraw status --request-id 3     # claimable_at (unix) / claimed / claimable_now
+
+# 3. claim — after the delay, release the USDC to the Safe. Direct EOA tx
+#    (permissionless), so the EOA again needs a little MON for gas.
+predict-cli withdraw claim --request-id 3
+```
+
+- `initiate --amount` is USDW whole units (6 decimals); it must be ≥ the wrapper's
+  `minUnwrapUsdw` and ≤ the Safe's USDW balance. `initiate` submits via the relayer
+  by default; `--dry-run` signs without submitting.
+- The pre-read requestId can race, so `initiate` re-confirms the real id from chain
+  after submitting — claim with the **confirmed** id it prints.
+- `claim` aborts if the request is not found, already claimed, or not yet claimable
+  (`claimable_at` still in the future — check with `withdraw status`).
+- All three accept `--rpc-url` to override the network RPC.
+
+## 5. Discover markets
 
 ```bash
 predict-cli gamma search "fed rate cuts" --limit-per-type 5
@@ -150,7 +222,7 @@ From a market object you need two identifiers:
 - `clobTokenIds` — the YES/NO outcome token ids (uint256 decimals). Orders, books,
   and prices are all per **token id**.
 
-## 5. Read the market
+## 6. Read the market
 
 Pull these before quoting a price:
 
@@ -166,7 +238,7 @@ Batch variants: `midpoints` / `spreads` / `last-trades` take bare ids
 (`last-trades` is server-capped at 500); `prices` / `books` take `<id>:<side>`
 entries, e.g. `predict-cli prices 123:buy 456:sell`.
 
-## 6. Place orders
+## 7. Place orders
 
 The order signature embeds the EOA key, the chain id, and the **exchange the
 market settles on** (EIP-712 `verifyingContract`). All three resolve
@@ -234,7 +306,7 @@ predict-cli order post-batch --tokens t1,t2 --prices 0.10,0.05 --sizes 5,5 \
   --side buy --fee-rate-bps 20               # ≤ 15 orders, shared side/fee/maker
 ```
 
-## 7. Track fills and balances
+## 8. Track fills and balances
 
 ```bash
 predict-cli trade --asset-id <TOKEN_ID> --limit 50   # trade history (L2-auth)
@@ -253,7 +325,7 @@ fill), `MINT` (mints the complementary token — neg-risk maker side), or `MERGE
 (burns a complementary pair). `data activity` rows carry an `activity_type` of
 `TRADE` / `SPLIT` / `MERGE` / `REDEEM` / `REWARD` / `CONVERSION`.
 
-## 8. Positions & PnL
+## 9. Positions & PnL
 
 The Data API is keyed by **wallet address — use the Safe address**:
 
@@ -265,7 +337,7 @@ predict-cli data activity <SAFE_ADDRESS>     # trades + splits + merges + redeem
 predict-cli data user-pnl <SAFE_ADDRESS>
 ```
 
-## 9. CTF operations (split / merge / redeem)
+## 10. CTF operations (split / merge / redeem)
 
 On-chain writes go through the relayer as Safe meta-transactions, so they require
 the default `gnosis-safe` signature type plus a stored Safe address. They run
@@ -298,7 +370,7 @@ once the condition is resolved on-chain (non-zero `payoutNumerators`).
 `ctf collection-id` reads `getCollectionId` on-chain (RPC from the network, override
 with `--rpc-url`) but submits no transaction.
 
-## 10. Watch live
+## 11. Watch live
 
 ```bash
 predict-cli ws ping                                   # connectivity check
@@ -310,18 +382,23 @@ predict-cli ws user --market <CONDITION_ID>           # own orders + trades; rep
 For one-shot checks prefer REST reads; use `ws` when the user wants continuous
 monitoring or to wait for a fill.
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
 | `private key required` / `no private key configured` | `predict-cli wallet create` / `import`, or pass `--private-key` (no env var) |
 | 401 / `authentication failed` | `predict-cli auth derive-key` (existing key) or `auth create-key` |
 | `no maker for signature_type=gnosis-safe` | store the Safe with `predict-cli wallet set-safe <addr>` (or `setup`), pass `--maker <SAFE>`, or use `--signature-type eoa` |
-| `INVALID_SIGNATURE: signer mismatch` on `POST /order` | neg-risk market — re-sign with `--exchange-address 0x50b7B00EE75F8bFb5cDa892883aFb3867851c738` (see §6) |
+| `INVALID_SIGNATURE: signer mismatch` on `POST /order` | neg-risk market — re-sign with `--exchange-address 0x50b7B00EE75F8bFb5cDa892883aFb3867851c738` (see §7) |
 | `ORDER_SIZE_TOO_SMALL: … requires share >= 5` | raise size to ≥ 5 shares |
 | `… has N decimals; lot size is 2` | round `size` (or market `amount / price`) to a multiple of 0.01 |
 | price rejected | re-check `tick-size` — too many decimals for this market |
-| allowance / transfer failures on split or first order | `approve check`, then `approve set --execute` (and the ConditionalTokens approval in §9 for split/merge) |
+| allowance / transfer failures on split or first order | `approve check`, then `approve set --execute` (and the ConditionalTokens approval in §10 for split/merge) |
+| `EOA … holds … but deposit needs …` | fund the EOA with USDC (plus a little MON for gas) before `deposit` |
+| `amount … is below minUnwrapUsdw` | raise the `withdraw initiate` amount to the wrapper's minimum |
+| `request … not claimable yet` | wait out `unwrapDelay` (~24h on Monad); poll `withdraw status` |
+| `a Safe is already deployed … for this (EOA, scopeId)` | the Safe exists — `wallet set-safe` it; `deploy-safe` is one-shot |
+| `SAFE-CREATE requires a scope_id` | set `scope_id` (via `setup` / config.toml / `--scope-id`) before `deploy-safe` |
 | `next_cursor: "LTE="` in paginated output | end of stream — stop paging |
 
 Deeper reference: `docs/orders.md`, `docs/ws.md`, `docs/wallet.md`,
