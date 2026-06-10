@@ -23,11 +23,11 @@ The skill installs `predict-cli` on first use (`scripts/ensure-cli.sh`, idempote
 
 | Skill | What it does |
 |-------|--------------|
-| [`predict`](skills/predict/SKILL.md) | Install the CLI; set up a wallet + L2 API key; create a Safe; deposit / withdraw collateral (USDC↔USDW); discover markets; read tick size / fee / book / midpoint; place and cancel limit & market orders; track fills, balances, positions and PnL; split / merge / redeem conditional tokens; stream live order-book and user feeds. |
+| [`predict`](skills/predict/SKILL.md) | Install the CLI; set up a wallet + L2 API key; create a Safe; deposit / withdraw collateral (USDC↔USDW); discover markets; read tick size / fee / book / midpoint; place and cancel limit & market orders; track fills, balances, positions and PnL; split / merge / redeem conditional tokens; stream live order-book and user feeds; run multiple accounts side by side (`--slug`). |
 
 It triggers on any mention of `predict-cli`, HermesTrade, prediction markets, YES/NO tokens,
-CLOB orders, or conditional tokens (CTF) — including read-only questions like *"what's the
-midpoint"* or *"show my positions"*.
+CLOB orders, conditional tokens (CTF), or switching between trading accounts — including
+read-only questions like *"what's the midpoint"* or *"show my positions"*.
 
 ## Quickstart
 
@@ -48,6 +48,8 @@ predict-cli order create --token <TOKEN_ID> --side buy --price 0.34 --size 100 \
 
 No environment variables: the built-in `monad` network supplies the tenant, chain id,
 endpoints, exchange, and contract addresses, and `config.toml` holds your key and Safe.
+Several accounts side by side? Prefix any command with `-s <name>` — each slug gets its
+own isolated config dir (`~/.config/predict/<name>/`), key, Safe, and L2 key.
 Binary YES/NO markets sign against the CTF Exchange automatically; for sports /
 multi-outcome markets add `--exchange-address <Neg Risk CTF Exchange>`. See
 [`SKILL.md`](skills/predict/SKILL.md) for the full workflow.

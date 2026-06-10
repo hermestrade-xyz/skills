@@ -5,12 +5,13 @@ description: >-
   install the CLI, set up a wallet and L2 API key, create a Safe, deposit and
   withdraw collateral (USDC↔USDW), discover markets, read orderbooks, place and
   cancel limit/market orders, track positions and PnL, split/merge/redeem
-  conditional tokens, and stream live WebSocket updates. Use this skill whenever
-  the user mentions predict-cli, predict-rs, hermestrade, prediction markets,
-  outcome shares, YES/NO tokens, CLOB orders, conditional tokens (CTF), or
-  depositing / withdrawing / funding the Safe — even if they don't name the tool
-  explicitly, and even for read-only questions like "what's the midpoint" or
-  "show my positions".
+  conditional tokens, stream live WebSocket updates, and run several trading
+  accounts side by side (--slug). Use this skill whenever the user mentions
+  predict-cli, predict-rs, hermestrade, prediction markets, outcome shares,
+  YES/NO tokens, CLOB orders, conditional tokens (CTF), depositing /
+  withdrawing / funding the Safe, or switching between multiple trading
+  accounts — even if they don't name the tool explicitly, and even for
+  read-only questions like "what's the midpoint" or "show my positions".
 ---
 
 # Trading prediction markets with predict-cli
@@ -33,6 +34,14 @@ installer (statically linked musl binary on Linux, sha256-verified):
 
 ```bash
 curl -sSfL https://raw.githubusercontent.com/chainupcloud/predict-rs/main/install.sh | sh
+```
+
+The installer defaults to `/usr/local/bin` (uses `sudo` when that isn't
+writable); set `INSTALL_DIR` to install somewhere user-writable without sudo:
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/chainupcloud/predict-rs/main/install.sh \
+  | INSTALL_DIR=~/.local/bin sh
 ```
 
 Inside a `predict-rs` checkout, `cargo build --release` →
@@ -85,8 +94,9 @@ predict-cli wallet show                   # EOA + Safe + signature type + config
 
 > **After setting up the wallet, tell the user where the key lives and to back it
 > up.** A freshly created EOA exists only in `<config-dir>/config.toml` (Linux:
-> `~/.config/predict/config.toml`; macOS: `~/Library/Application Support/predict/config.toml`)
-> — lose that file and the funds are unrecoverable. Surface the exact path
+> `~/.config/predict/config.toml`; macOS: `~/Library/Application Support/predict/config.toml`;
+> with `--slug <name>`: `…/predict/<name>/config.toml`) — lose that file and the
+> funds are unrecoverable. Surface the exact path
 > (`predict-cli wallet show` prints `config path`) and remind the user to back it
 > up somewhere safe. Backing up means the user copying the file themselves — don't
 > print the key.
@@ -121,13 +131,50 @@ Key facts that prevent confusion later:
   `/proc/<pid>/environ`). Prefer the config file over the flag (flags leak into
   shell history).
 - Config lives in `~/.config/predict/config.toml` (Linux, dir mode 0700, file
-  mode 0600) or `~/Library/Application Support/predict` (macOS). `config.toml`
-  persists `private_key`, `safe_address`, `scope_id`, `signature_type`, and
-  optional `network` / `chain_id` / `tenant` overrides. Only `private_key` is
-  required for signing; the network provides the rest.
+  mode 0600) or `~/Library/Application Support/predict` (macOS); with
+  `--slug <name>` it nests to `~/.config/predict/<name>/config.toml` (next
+  subsection). `config.toml` persists `private_key`, `safe_address`,
+  `scope_id`, `signature_type`, and optional `network` / `chain_id` / `tenant`
+  overrides. Only `private_key` is required for signing; the network provides
+  the rest.
+
+### Multiple accounts — `--slug` / `-s`
+
+Run several wallets side by side by giving each its own config dir. `--slug
+<name>` (short `-s`) nests one level under the base dir: the effective file
+becomes `<config-dir>/<name>/config.toml` (default
+`~/.config/predict/<name>/config.toml`). It is a **global flag** — put it
+before or after any subcommand. `<name>` must be a single path segment (`/`,
+`\`, `..`, `.` are rejected), so a slug can only ever name a direct child of
+the config root. `--config-dir` still works and acts as the base:
+`--config-dir /data/pm -s acctA` → `/data/pm/acctA/`.
+
+```bash
+# Set up two isolated accounts — each gets its own key / Safe / scope / L2 key
+predict-cli -s acctA wallet create
+predict-cli -s acctA wallet deploy-safe
+predict-cli -s acctA auth create-key
+predict-cli -s acctB wallet create        # lives in ~/.config/predict/acctB/
+
+# Then prefix any command with the account
+predict-cli -s acctA order list
+predict-cli -s acctB balance --asset-type collateral
+```
+
+- Each invocation is an independent process reading only its own dir —
+  accounts never share keys, Safes, or order state.
+- `predict-cli -s acctA shell` scopes the whole REPL session: every line that
+  doesn't pick an account itself runs as `acctA` (a line can still override
+  with its own `-s` / `--config-dir`). The banner shows the bound account dir.
+- **Always know which account a command acts on.** A bare `predict-cli` (no
+  `-s`) is the *default* account — easy to hit by accident in a multi-account
+  setup. Before anything money-moving, check the slug on the command line and
+  name the account when asking the operator to confirm (§3);
+  `predict-cli -s <name> wallet show` prints the config path it loaded.
 
 Before a trading session, sanity-check with `predict-cli endpoints`,
-`predict-cli wallet show`, and `predict-cli balance --asset-type collateral`.
+`predict-cli wallet show`, and `predict-cli balance --asset-type collateral`
+(each with the session's `-s <slug>` if you're using accounts).
 
 ## 3. Safety rules (real funds)
 
@@ -136,8 +183,9 @@ Orders and CTF operations move real money. Hold to these:
 - **Confirm before committing funds.** Before any `order create` / `order market`
   / `deposit` / `withdraw` / `ctf … --execute` / `approve set --execute` /
   `wallet deploy-safe`, state the market, side, price, size, and resulting notional
-  (or the amount moved), and get the operator's explicit go-ahead — unless they
-  have already given you a standing budget and instruction.
+  (or the amount moved) — plus **which account** (`-s <slug>`) when more than one
+  is configured — and get the operator's explicit go-ahead, unless they have
+  already given you a standing budget and instruction.
 - **Dry-run first on new flows.** `order create --dry-run` prints the signed
   envelope without posting; `ctf` / `approve` writes default to dry-run and only
   submit with `--execute`. **`deposit` / `withdraw` / `wallet deploy-safe` are the
@@ -399,6 +447,8 @@ monitoring or to wait for a fill.
 | `request … not claimable yet` | wait out `unwrapDelay` (~24h on Monad); poll `withdraw status` |
 | `a Safe is already deployed … for this (EOA, scopeId)` | the Safe exists — `wallet set-safe` it; `deploy-safe` is one-shot |
 | `SAFE-CREATE requires a scope_id` | set `scope_id` (via `setup` / config.toml / `--scope-id`) before `deploy-safe` |
+| wrong account hit / balance unexpectedly empty in a multi-account setup | the `-s <slug>` was missing or wrong — every command needs it; `wallet show` prints the loaded config path; `shell` binds the launch-time account |
+| `invalid --slug …: must be a single path segment` | slugs can't contain `/`, `\`, `..`, `.`; use a plain name (`acctA`) — for an arbitrary path use `--config-dir` instead |
 | `next_cursor: "LTE="` in paginated output | end of stream — stop paging |
 
 Deeper reference: `docs/orders.md`, `docs/ws.md`, `docs/wallet.md`,

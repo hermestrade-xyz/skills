@@ -10,11 +10,14 @@ if command -v predict-cli >/dev/null 2>&1; then
 fi
 
 echo "predict-cli not found — installing latest release..."
-curl -sSfL https://raw.githubusercontent.com/chainupcloud/predict-rs/main/install.sh | sh
+# The installer honors INSTALL_DIR (default /usr/local/bin, sudo when needed);
+# run as `INSTALL_DIR=~/.local/bin scripts/ensure-cli.sh` to avoid sudo.
+curl -sSfL https://raw.githubusercontent.com/chainupcloud/predict-rs/main/install.sh \
+  | INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}" sh
 
 if ! command -v predict-cli >/dev/null 2>&1; then
   echo "Error: install finished but predict-cli is not on PATH" >&2
-  echo "Check that /usr/local/bin is in PATH, or build from source: cargo build --release" >&2
+  echo "Check that ${INSTALL_DIR:-/usr/local/bin} is in PATH, or build from source: cargo build --release" >&2
   exit 1
 fi
 
