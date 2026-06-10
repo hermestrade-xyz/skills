@@ -154,6 +154,8 @@ the config root. `--config-dir` still works and acts as the base:
 predict-cli -s acctA wallet create
 predict-cli -s acctA wallet deploy-safe
 predict-cli -s acctA auth create-key
+predict-cli -s acctA approve set --execute  # one-time per Safe: USDW + CTF approvals —
+                                            # without them orders match but never settle (§7)
 predict-cli -s acctB wallet create        # lives in ~/.config/predict/acctB/
 
 # Then prefix any command with the account
@@ -173,7 +175,8 @@ predict-cli -s acctB balance --asset-type collateral
   `predict-cli -s <name> wallet show` prints the config path it loaded.
 
 Before a trading session, sanity-check with `predict-cli endpoints`,
-`predict-cli wallet show`, and `predict-cli balance --asset-type collateral`
+`predict-cli wallet show`, `predict-cli balance --asset-type collateral`, and —
+on a Safe that hasn't traded yet — `predict-cli approve check` (§7/§10)
 (each with the session's `-s <slug>` if you're using accounts).
 
 ## 3. Safety rules (real funds)
@@ -288,6 +291,14 @@ entries, e.g. `predict-cli prices 123:buy 456:sell`.
 
 ## 7. Place orders
 
+> **First order from a fresh Safe? Run `predict-cli approve set --execute` once
+> first (§10).** Without the exchange approvals the order still POSTs `success`
+> and the engine reports it `matched` — but on-chain settlement reverts: no
+> tokens minted, no USDW moved. Nothing fails at order time; the only signal is
+> `status: TRADE_STATUS_FAILED` (often with `match_type: MINT`) in
+> `predict-cli trade -o json`. Treat a fill as real only at `…CONFIRMED` —
+> **never trust the POST `success` alone** (§8).
+
 The order signature embeds the EOA key, the chain id, and the **exchange the
 market settles on** (EIP-712 `verifyingContract`). All three resolve
 automatically from `config.toml` + the `monad` network — there is nothing to
@@ -365,10 +376,12 @@ predict-cli balance --asset-type conditional --token <TOKEN_ID>
 `balance --update` forces a subgraph refresh; plain `balance` returns the cached
 value. Cross-check on-chain when a balance is load-bearing.
 
-On `/ws/user` (and in `trade` output) the trade `status` field takes the uppercase
-`TradeStatus` values `MATCHED` / `MINED` / `CONFIRMED` / `RETRYING` / `FAILED`.
+The trade `status` field takes the values `MATCHED` / `MINED` / `CONFIRMED` /
+`RETRYING` / `FAILED` — short UPPERCASE on `/ws/user`, long-form
+`TRADE_STATUS_*` (e.g. `TRADE_STATUS_CONFIRMED`) in REST `trade` output.
 Treat a fill as final only at `CONFIRMED`; `MATCHED` means the engine matched it
-but settlement is still pending. The `match_type` field is `MATCH` (bilateral
+but on-chain settlement is still pending — and can still revert to `FAILED`
+(most often missing approvals, §7/§10). The `match_type` field is `MATCH` (bilateral
 fill), `MINT` (mints the complementary token — neg-risk maker side), or `MERGE`
 (burns a complementary pair). `data activity` rows carry an `activity_type` of
 `TRADE` / `SPLIT` / `MERGE` / `REDEEM` / `REWARD` / `CONVERSION`.
@@ -393,7 +406,8 @@ against the built-in network (chain id, RPC, relayer, and contract addresses com
 from `monad` — there is **no `--network-config` flag**), and default to **dry-run**:
 
 ```bash
-# One-time approvals. approve check uses the stored Safe (or --address <SAFE>).
+# One-time approvals — also the prerequisite for a fresh Safe's FIRST ORDER (§7).
+# approve check uses the stored Safe (or --address <SAFE>).
 # approve set defaults to --asset all over the three exchange targets via MultiSend.
 predict-cli approve check
 predict-cli approve set   --execute
@@ -442,6 +456,7 @@ monitoring or to wait for a fill.
 | `… has N decimals; lot size is 2` | round `size` (or market `amount / price`) to a multiple of 0.01 |
 | price rejected | re-check `tick-size` — too many decimals for this market |
 | allowance / transfer failures on split or first order | `approve check`, then `approve set --execute` (and the ConditionalTokens approval in §10 for split/merge) |
+| order POST returns `success` / trade shows `matched`, but no position appears and balances don't move | the Safe never ran `approve set --execute` — the engine matched but on-chain MINT settlement failed (`trade -o json` shows `TRADE_STATUS_FAILED`). Approve (§10), re-place the order, and only trust `TRADE_STATUS_CONFIRMED` |
 | `EOA … holds … but deposit needs …` | fund the EOA with USDC (plus a little MON for gas) before `deposit` |
 | `amount … is below minUnwrapUsdw` | raise the `withdraw initiate` amount to the wrapper's minimum |
 | `request … not claimable yet` | wait out `unwrapDelay` (~24h on Monad); poll `withdraw status` |
